@@ -1,0 +1,5 @@
+type,name,x,y,z,length,width,height
+frame,F1,-3430,0,0,4970,1860,930
+frame,F2,777.5,0,0,3445,1860,930
+frame,F3,4207.5,0,0,3415,2210,930
+conveyor,Twin Conveyor,0,0,1272,11750,330,16
