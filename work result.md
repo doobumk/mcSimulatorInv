@@ -308,3 +308,11 @@ https://github.com/doobumk/mcSimulatorInv
 - 기존 README의 저장소 설명: machine simualtor with MCC and PLC logic.
 - 검증: 기존 unittest 6개 통과.
 
+#### 답변 (진행 안내)
+
+로컬 커밋은 완료됐지만 Git 전송이 아직 응답하지 않고 있습니다. 연결된 GitHub 기능으로 업로드를 마무리하고 원격 커밋을 확인하겠습니다.
+
+#### 업로드 결과 및 최종 답변
+
+Git 전송이 정상 완료되어 별도 API 업로드는 필요하지 않았습니다. 소스코드와 작업 기록을 https://github.com/doobumk/mcSimulatorInv 의 main 브랜치에 업로드했습니다. 소스코드 커밋은 b8d95c9입니다. 가상환경·캐시·실행 로그는 제외했습니다.
+
