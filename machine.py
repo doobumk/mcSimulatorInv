@@ -68,6 +68,35 @@ class unit:
     coordinate: coordinate = field(default_factory=coordinate)
     motors: list[motor] = field(default_factory=list)
     cylinders: list[cylinder] = field(default_factory=list)
+    kind: str = "process"
+    length: float = 0.0
+    width: float = 0.0
+    height: float = 0.0
+    cvBelt: tuple[float, float, float] | None = None
+    cvbeltAmt: int = 0
+
+    @property
+    def x_start(self):
+        return self.coordinate.x - (self.cvBelt[0] if self.cvBelt else self.length) / 2
+
+    @property
+    def x_end(self):
+        return self.coordinate.x + (self.cvBelt[0] if self.cvBelt else self.length) / 2
+
+    @property
+    def belt_top(self):
+        return self.coordinate.z + (self.cvBelt[2] if self.cvBelt else self.height) / 2
+
+    @property
+    def belt_centers_y(self):
+        """전체 폭 안에 벨트를 균등 배치한다. 한 줄이면 중앙 배치."""
+        if self.cvBelt is None or self.cvbeltAmt == 0:
+            return []
+        if self.cvbeltAmt == 1:
+            return [self.coordinate.y]
+        span = self.width - self.cvBelt[1]
+        return [self.coordinate.y - span / 2 + i * span / (self.cvbeltAmt - 1)
+                for i in range(self.cvbeltAmt)]
 
     def add_motor(self, name: str) -> motor:
         component = part.create_motor(name)

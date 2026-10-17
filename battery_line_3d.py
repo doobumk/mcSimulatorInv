@@ -7,23 +7,28 @@ import sys
 import time
 import argparse
 
-from battery_line import BatteryLine
+from battery_line import BatteryLine, Cell
 from line_datasheet import DEFAULT_DATASHEET
 
 
 def main():
     parser = argparse.ArgumentParser(description="Battery line 3D simulator")
     parser.add_argument("--datasheet", default=DEFAULT_DATASHEET, help="Frame/unit CSV file")
+    parser.add_argument("--smoke-test-report", help=argparse.SUPPRESS)
     args = parser.parse_args()
     try:
         model = BatteryLine(args.datasheet)
     except (OSError, ValueError) as exc:
+        if getattr(sys, "frozen", False):
+            raise ValueError(f"데이터시트 로딩 실패: {exc}") from exc
         parser.error(str(exc))
     try:
         import pyvista as pv
         from pyvistaqt import QtInteractor
         from PySide6 import QtCore, QtWidgets
     except ImportError as exc:
+        if getattr(sys, "frozen", False):
+            raise ImportError("3D 라이브러리를 불러오지 못했습니다.") from exc
         raise SystemExit("3D dependencies missing. Run: python -m pip install -r requirements-3d.txt") from exc
 
     class Window(QtWidgets.QMainWindow):
@@ -50,14 +55,27 @@ def main():
             self.speed.setValue(300)
             self.speed.valueChanged.connect(lambda v: self.model.configure(speed=v))
             ui.addWidget(self.speed)
-            ui.addWidget(QtWidgets.QLabel("7-Cell Batch Pitch (mm)"))
+            ui.addWidget(QtWidgets.QLabel("Product Pitch (mm)"))
             self.pitch = QtWidgets.QDoubleSpinBox()
-            self.pitch.setRange(123, 1000)
-            self.pitch.setValue(180)
+            self.pitch.setRange(self.model.minimum_pitch, max(1000, self.model.minimum_pitch))
+            self.pitch.setValue(self.model.pitch)
             self.pitch.valueChanged.connect(lambda v: self.model.configure(pitch=v))
             ui.addWidget(self.pitch)
-            for label, action in [("7셀 투입 START", self.feed), ("이송 STOP", self.model.pause),
-                                  ("셀 초기화", self.clear)]:
+            source = self.model.inputs[0]
+            ui.addWidget(QtWidgets.QLabel("투입 주기 (초)"))
+            self.cycle = QtWidgets.QDoubleSpinBox()
+            self.cycle.setRange(0.01, 86400)
+            self.cycle.setValue(source.cycle)
+            self.cycle.valueChanged.connect(lambda v: source.configure(cycle=v))
+            ui.addWidget(self.cycle)
+            ui.addWidget(QtWidgets.QLabel("주기당 제품 수"))
+            self.amount = QtWidgets.QSpinBox()
+            self.amount.setRange(1, 10000)
+            self.amount.setValue(source.amount)
+            self.amount.valueChanged.connect(lambda v: source.configure(amount=v))
+            ui.addWidget(self.amount)
+            for label, action in [("주기 투입 START", self.feed), ("이송 STOP", self.model.pause),
+                                  ("제품 초기화", self.clear)]:
                 button = QtWidgets.QPushButton(label)
                 button.clicked.connect(action)
                 ui.addWidget(button)
@@ -69,9 +87,9 @@ def main():
             unit_info = "\n".join(f"{u.name}: {u.kind}" for u in self.model.units)
             info = QtWidgets.QLabel(
                 frame_info + "\n\n" + unit_info + "\n\n"
-                f"Belt: 폭 30 mm / C-C {self.model.conveyor.width - 30:g} mm\n\n"
-                "Cell: X 123 / Y 600 / Z 17.8 mm\nLead: 폭 45 / 돌출 22 mm, 양끝\n\n"
-                "START 1회 = 7셀 투입\nSTOP 후 START = 추가 투입 및 재개\n\n"
+                f"Belt: {self.model.conveyor.cvBelt} mm × {self.model.conveyor.cvbeltAmt}줄\n\n"
+                f"Product: {source.product.size} mm\nInput: {source.input_pos}\n\n"
+                "START: 주기마다 설정 개수 투입\n첫 투입은 한 주기 후\nSTOP: 이송 및 주기 일시정지\n설정 변경: 주기 타이머 초기화\n\n"
                 "좌클릭: 회전\nShift+좌클릭 / 가운데 버튼: 이동\n휠: 확대/축소")
             info.setWordWrap(True)
             ui.addWidget(info)
@@ -119,15 +137,15 @@ def main():
             for component in self.model.units:
                 p = component.coordinate
                 if component.kind == "conveyor":
-                    for side in (-1, 1):
-                        y = p.y + side * (component.width - 30) / 2
-                        self.box((component.length, 30, component.height), (p.x, y, p.z), "#30363a")
-                        self.box((component.length, 8, 30), (p.x, y, p.z - component.height / 2 - 10), "#697177")
+                    belt_length, belt_width, belt_height = component.cvBelt
+                    for y in component.belt_centers_y:
+                        self.box(component.cvBelt, (p.x, y, p.z), "#30363a")
+                        self.box((belt_length, 8, 30), (p.x, y, p.z - belt_height / 2 - 10), "#697177")
                 else:
                     self.box((component.length, component.width, component.height), (p.x, p.y, p.z), "#8c9eac")
 
         def feed(self):
-            self.model.inject_batch()
+            self.model.start_input()
             self.sync_cells()
 
         def clear(self):
@@ -142,13 +160,14 @@ def main():
                         self.plot.remove_actor(actor, render=False)
             for cell in self.model.cells:
                 if cell.id not in self.actors:
-                    belt_top = self.model.BELT_TOP
-                    actors = [self.box(self.model.CELL_SIZE, (0, 0, belt_top + 8.9), "#67b7dc")]
-                    for side in (-1, 1):
-                        actors.append(self.box((45, 22, 3.5), (0, side * 311, belt_top + 19.8), "#c8a54d"))
+                    actors = [self.box(cell.size, (0, 0, 0), "#67b7dc")]
+                    if isinstance(cell, Cell):
+                        for side in (-1, 1):
+                            actors.append(self.box((45, 22, 3.5),
+                                (0, side * (cell.size[1] / 2 + 11), cell.size[2] / 2 + 2), "#c8a54d"))
                     self.actors[cell.id] = actors
                 for actor in self.actors[cell.id]:
-                    actor.SetPosition(cell.x, self.model.conveyor.coordinate.y, 0)
+                    actor.SetPosition(cell.x, cell.y, cell.z)
 
         def view(self, name):
             positions = {"top": (0, -50, 11000), "front": (0, -11000, 1450), "iso": (7300, -7300, 5200)}
@@ -166,7 +185,7 @@ def main():
             self.model.step(min(max(now - self.last, 1e-6), 0.05))
             self.last = now
             self.sync_cells()
-            self.status.setText(f"상태: {self.model.state.value} | 셀: {len(self.model.cells)}")
+            self.status.setText(f"상태: {self.model.state.value} | 제품: {len(self.model.products)}")
             self.plot.render()
 
         def closeEvent(self, event):
@@ -177,6 +196,44 @@ def main():
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
     window = Window()
     window.show()
+    if args.smoke_test_report:
+        # Exercise the packaged application with its real Qt/VTK rendering stack.
+        def smoke_test():
+            import json
+            import traceback
+            from pathlib import Path
+
+            report = Path(args.smoke_test_report)
+            result = {"ok": False, "datasheet": str(args.datasheet)}
+            try:
+                window.timer.stop()
+                window.feed()
+                assert not model.products
+                model.step(model.inputs[0].cycle)
+                window.sync_cells()
+                assert len(model.products) == model.inputs[0].amount
+                assert len(window.actors) == len(model.products)
+                first_x = model.cells[0].x
+                model.step(1)
+                window.sync_cells()
+                assert model.cells[0].x == first_x + model.speed
+                model.pause()
+                stopped_x = model.cells[0].x
+                model.step(1)
+                assert model.cells[0].x == stopped_x
+                for name in ('top', 'front', 'iso'):
+                    window.view(name)
+                window.plot.screenshot(str(report.with_suffix('.png')))
+                window.clear()
+                assert not model.cells and not window.actors
+                result.update(ok=True, frames=len(model.frames), units=len(model.units))
+            except Exception:
+                result['error'] = traceback.format_exc()
+            finally:
+                report.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
+                window.close()
+                app.exit(0 if result['ok'] else 1)
+        QtCore.QTimer.singleShot(750, smoke_test)
     app.exec()
 
 

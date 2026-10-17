@@ -1,27 +1,88 @@
 import unittest
+import csv
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from battery_line import BatteryLine
-from line_datasheet import BatteryFrame, LineUnit, COLUMNS
+from line_datasheet import BatteryFrame, LineUnit, COLUMNS, DEFAULT_DATASHEET
 from machine import frame, unit, machine
 
 
 class BatteryLineTests(unittest.TestCase):
+    def test_csv_controls_belts_products_and_input(self):
+        with DEFAULT_DATASHEET.open(encoding='utf-8-sig', newline='') as source:
+            rows = list(csv.DictReader(source))
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / 'configured.csv'
+            for count in (1, 3):
+                for row in rows:
+                    if row['type'] == 'conveyor':
+                        row.update(cvBeltLength='9000', cvBeltWidth='40', cvBeltHeight='20', cvbeltAmt=str(count))
+                    elif row['type'] == 'product':
+                        row.update(length='210', width='400', height='25')
+                    elif row['type'] == 'product_input':
+                        row.update(x='-4000', y='75', z='1500', cycle='2', amount='3')
+                with path.open('w', encoding='utf-8-sig', newline='') as output:
+                    writer = csv.DictWriter(output, fieldnames=COLUMNS)
+                    writer.writeheader()
+                    writer.writerows(reversed(rows))  # product references can precede definitions
+                line = BatteryLine(path)
+                self.assertIs(type(line.conveyor), unit)
+                self.assertEqual(line.conveyor.cvBelt, (9000, 40, 20))
+                self.assertEqual(len(line.conveyor.belt_centers_y), count)
+                self.assertEqual(line.conveyor.belt_centers_y, [0] if count == 1 else [-145, 0, 145])
+                self.assertEqual((line.LINE_START, line.LINE_END, line.BELT_TOP), (-4500, 4500, 1282))
+                self.assertEqual(line.minimum_pitch, 210)
+                line.start_input()
+                line.step(2)
+                self.assertEqual(len(line.products), 3)
+                self.assertEqual(line.products[-1].size, (210, 400, 25))
+                self.assertEqual((line.products[-1].x, line.products[-1].y, line.products[-1].z), (-4000, 75, 1500))
+
+    def test_invalid_belt_and_product_configuration(self):
+        with DEFAULT_DATASHEET.open(encoding='utf-8-sig', newline='') as source:
+            original = list(csv.DictReader(source))
+        cases = [('conveyor', 'cvbeltAmt', '0'), ('conveyor', 'cvbeltAmt', '1.5'),
+                 ('conveyor', 'cvBeltWidth', '200'), ('conveyor', 'cvBeltHeight', 'nan'),
+                 ('product', 'length', '-1'), ('product_input', 'product', 'missing'),
+                 ('product_input', 'z', 'inf'), ('product_input', 'cycle', '0')]
+        with TemporaryDirectory() as directory:
+            for kind, key, value in cases:
+                with self.subTest(kind=kind, key=key, value=value):
+                    rows = [dict(row) for row in original]
+                    next(row for row in rows if row['type'] == kind)[key] = value
+                    path = Path(directory) / 'invalid.csv'
+                    with path.open('w', encoding='utf-8', newline='') as output:
+                        writer = csv.DictWriter(output, fieldnames=COLUMNS)
+                        writer.writeheader()
+                        writer.writerows(rows)
+                    with self.assertRaisesRegex(ValueError, r'invalid.csv:\d+:'):
+                        BatteryLine(path)
+
     def test_default_datasheet_preserves_original_layout(self):
         line = BatteryLine()
         self.assertIsInstance(line, machine)
         self.assertTrue(all(isinstance(f, BatteryFrame) and isinstance(f, frame) for f in line.frames))
-        self.assertIsInstance(line.units[0], unit)
-        self.assertIsInstance(line.units[0], LineUnit)
-        self.assertEqual([(f.length, f.width) for f in line.frames], [(4970, 1860), (3445, 1860), (3415, 2210)])
+        self.assertIs(type(line.conveyor), unit)
+        self.assertNotIsInstance(line.conveyor, machine)
+        self.assertIn(line.conveyor, line.units)
+        self.assertEqual([(f.length, f.width) for f in line.frames[:3]], [(4970, 1860), (3445, 1860), (3415, 2210)])
         self.assertEqual((line.LINE_START, line.LINE_END, line.BELT_TOP), (-5875, 5875, 1280))
         self.assertEqual(line.frames[0].x_end, line.frames[1].x_start)
         self.assertEqual(line.frames[1].x_end, line.frames[2].x_start)
 
     def make_datasheet(self, directory, rows):
         path = Path(directory) / "custom.csv"
-        path.write_text(','.join(COLUMNS) + '\n' + '\n'.join(rows), encoding='utf-8-sig')
+        expanded = []
+        for row in rows:
+            columns = row.split(',')
+            if len(columns) == 8:
+                columns += ([columns[5], '30', columns[7], '2', '', '', '']
+                            if columns[0] == 'conveyor' else [''] * 7)
+            expanded.append(','.join(columns))
+        expanded += ['product,Cell Template,0,0,0,123,600,17.8,,,,,Cell,,',
+                     'product_input,Input,40,100,1358.9,,,,,,,,Cell Template,5,7']
+        path.write_text(','.join(COLUMNS) + '\n' + '\n'.join(expanded), encoding='utf-8-sig')
         return path
 
     def test_custom_frames_and_units_control_transport(self):
@@ -74,8 +135,7 @@ class BatteryLineTests(unittest.TestCase):
         self.assertEqual(line.cells[0].x, start + 600)
         line.inject_batch()
         self.assertEqual(len(line.cells), 14)
-        positions = sorted(c.x for c in line.cells)
-        self.assertTrue(all(b - a >= 180 for a, b in zip(positions, positions[1:])))
+        self.assertEqual(line.cells[-1].x, line.inputs[0].input_pos.x)
 
     def test_continuous_transport_and_exit(self):
         line = BatteryLine()
